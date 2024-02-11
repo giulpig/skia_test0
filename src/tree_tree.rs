@@ -1,8 +1,26 @@
-use anyhow::Result;
+use rug::float::OrdFloat;
+use rug::Float;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::error::Error;
 use std::rc::Rc;
+
+/////////////////////////////////////////////////////////
+//                          Consts
+/////////////////////////////////////////////////////////
+const FLOAT_PRECISION: u32 = 300;
+
+/////////////////////////////////////////////////////////
+//                          Typedefs
+/////////////////////////////////////////////////////////
+type TreeNodeRef = Rc<RefCell<TreeNode>>;
+type TreeBranchRef = Rc<RefCell<TreeBranch>>;
+
+/////////////////////////////////////////////////////////
+//                     Utility functions
+/////////////////////////////////////////////////////////
+fn get_ord_float(val: f64) -> OrdFloat {
+    Float::with_val(FLOAT_PRECISION, val).into()
+}
 
 /////////////////////////////////////////////////////////
 //                      Struct definitions
@@ -10,33 +28,32 @@ use std::rc::Rc;
 
 #[derive(Debug)]
 struct TreeNode {
-    id: u32,
-    parent: Option<Rc<RefCell<TreeNode>>>,
-    children: Vec<Rc<RefCell<TreeBranch>>>,
+    id: OrdFloat,
+    parent: Option<TreeNodeRef>,
+    children: Vec<TreeBranchRef>,
 }
 
 #[derive(Debug)]
 struct TreeBranch {
-    dst: Rc<RefCell<TreeNode>>,
-    weigth: u32,
+    dst: TreeNodeRef,
+    weigth: OrdFloat,
 }
 
 #[derive(Debug)]
 struct TreeBranchRaw {
-    src: u32,
-    dst: u32,
-    weigth: u32,
+    src: OrdFloat,
+    dst: OrdFloat,
+    weigth: OrdFloat,
 }
 
 #[derive(Debug)]
 struct Tree {
-    root: Rc<RefCell<TreeNode>>,
-    nodes: HashMap<u32, Rc<RefCell<TreeNode>>>,
+    root: TreeNodeRef,
+    nodes: HashMap<OrdFloat, TreeNodeRef>,
 }
 
-struct TreeIterator<'a> {
-    tree: &'a Tree,
-    visit_list: VecDeque<Rc<RefCell<TreeNode>>>,
+struct TreeIterator {
+    visit_list: VecDeque<TreeNodeRef>,
     iteration_kind: TreeIteratorKind,
 }
 
@@ -52,17 +69,22 @@ enum TreeIteratorKind {
 impl Tree {
     fn new() -> Self {
         let root = Rc::new(RefCell::new(TreeNode {
-            id: 0,
+            id: get_ord_float(0.),
             parent: None,
             children: vec![],
         }));
         Tree {
             root: root.clone(),
-            nodes: [(0, root.clone())].into_iter().collect(),
+            nodes: [(get_ord_float(0.), root.clone())].into_iter().collect(),
         }
     }
 
-    fn add_child(&mut self, parent_id: u32, child: TreeNode, weigth: u32) -> anyhow::Result<()> {
+    fn add_child(
+        &mut self,
+        parent_id: OrdFloat,
+        child: TreeNode,
+        weigth: OrdFloat,
+    ) -> anyhow::Result<()> {
         if !self.nodes.contains_key(&parent_id) {
             return Err(anyhow::anyhow!("parent node not in the tree"));
         }
@@ -85,35 +107,33 @@ impl Tree {
 
     fn iter_dfs(&self) -> TreeIterator {
         TreeIterator {
-            tree: &self,
             visit_list: VecDeque::from(vec![self.root.clone()]),
             iteration_kind: TreeIteratorKind::Dfs,
         }
     }
     fn iter_bfs(&self) -> TreeIterator {
         TreeIterator {
-            tree: &self,
             visit_list: VecDeque::from(vec![self.root.clone()]),
-            iteration_kind: TreeIteratorKind::Dfs,
+            iteration_kind: TreeIteratorKind::Bfs,
         }
     }
     fn from_branch_list(branch_list_raw: &[TreeBranchRaw]) -> Self {
-        let node_map: HashMap<u32, Rc<RefCell<TreeNode>>> = branch_list_raw
+        let node_map: HashMap<OrdFloat, TreeNodeRef> = branch_list_raw
             .iter()
             .map(|branch_raw| {
                 [
                     (
-                        branch_raw.src,
+                        branch_raw.src.clone(),
                         Rc::new(RefCell::new(TreeNode {
-                            id: branch_raw.src,
+                            id: branch_raw.src.clone(),
                             parent: None,
                             children: vec![],
                         })),
                     ),
                     (
-                        branch_raw.dst,
+                        branch_raw.dst.clone(),
                         Rc::new(RefCell::new(TreeNode {
-                            id: branch_raw.dst,
+                            id: branch_raw.dst.clone(),
                             parent: None,
                             children: vec![],
                         })),
@@ -124,18 +144,23 @@ impl Tree {
             .collect();
 
         for branch_raw in branch_list_raw.iter() {
-            dbg!(&branch_raw);
-            // Assign parent
-            node_map
+            if node_map
                 .get(&branch_raw.dst)
                 .unwrap()
                 .borrow_mut()
                 .parent
-                .as_mut()
-                .map_or_else(
-                    || node_map.get(&branch_raw.src).unwrap().clone(),
-                    |_| panic!("multiple branches pointing to a node"),
-                );
+                .is_some()
+            {
+                panic!("multiple branches pointing to a node");
+            }
+
+            // Assign parent
+            let _ = &node_map
+                .get(&branch_raw.dst)
+                .unwrap()
+                .borrow_mut()
+                .parent
+                .get_or_insert_with(|| node_map.get(&branch_raw.src).unwrap().clone());
 
             // Assign children
             node_map
@@ -145,13 +170,13 @@ impl Tree {
                 .children
                 .push(Rc::new(RefCell::new(TreeBranch {
                     dst: node_map.get(&branch_raw.dst).unwrap().clone(),
-                    weigth: branch_raw.weigth,
+                    weigth: branch_raw.weigth.clone(),
                 })));
         }
 
         // Create tree and place root
         let mut tree = Tree::new();
-        let mut root: Option<Rc<RefCell<TreeNode>>> = None;
+        let mut root: Option<TreeNodeRef> = None;
         for node in node_map.into_iter() {
             if node.1.borrow_mut().parent.is_none() {
                 if root.is_none() {
@@ -165,34 +190,55 @@ impl Tree {
 
         tree
     }
+
+    fn insert_bst(&mut self, val: &OrdFloat) {
+        let mut node_to_compare = self.root.clone();
+        loop {
+            match node_to_compare.borrow().id.cmp(&val) {
+                std::cmp::Ordering::Equal => return,
+                std::cmp::Ordering::Less => {
+                    let children = &node_to_compare.borrow().children;
+                    if let Some(first_child) = children.first() {
+                        node_to_compare = first_child.borrow().dst.clone();
+                        continue;
+                    } else {
+                    }
+                }
+                std::cmp::Ordering::Greater => {
+                    if let Some(last_child) = node_to_compare.borrow().children.last() {}
+                }
+            }
+        }
+    }
 }
 
 /////////////////////////////////////////////////////////
-//                      Trait Implementations
+//                   Trait Implementations
 /////////////////////////////////////////////////////////
 
-impl<'a> Iterator for TreeIterator<'a> {
-    type Item = Rc<RefCell<TreeNode>>;
+impl Iterator for TreeIterator {
+    type Item = TreeNodeRef;
 
     fn next(&mut self) -> Option<Self::Item> {
-        return match self.visit_list.pop_front() {
-            None => None,
-            Some(node_to_visit) => {
-                match self.iteration_kind {
-                    TreeIteratorKind::Bfs => {
-                        node_to_visit.borrow().children.iter().for_each(|branch| {
-                            self.visit_list.push_back(branch.borrow().dst.clone())
-                        });
-                    }
-                    TreeIteratorKind::Dfs => {
-                        node_to_visit.borrow().children.iter().for_each(|branch| {
-                            self.visit_list.push_front(branch.borrow().dst.clone())
-                        });
-                    }
+        self.visit_list.pop_front().map(|node_to_visit| {
+            match self.iteration_kind {
+                TreeIteratorKind::Bfs => {
+                    node_to_visit
+                        .borrow()
+                        .children
+                        .iter()
+                        .for_each(|branch| self.visit_list.push_back(branch.borrow().dst.clone()));
                 }
-                Some(node_to_visit)
+                TreeIteratorKind::Dfs => {
+                    node_to_visit
+                        .borrow()
+                        .children
+                        .iter()
+                        .for_each(|branch| self.visit_list.push_front(branch.borrow().dst.clone()));
+                }
             }
-        };
+            node_to_visit
+        })
     }
 }
 
@@ -210,17 +256,17 @@ impl Eq for TreeNode {}
 mod test {
     use super::*;
 
-    fn get_example_tree() -> Tree {
+    fn get_simple_tree() -> Tree {
         let branches: Vec<TreeBranchRaw> = vec![
             TreeBranchRaw {
-                src: 0,
-                dst: 1,
-                weigth: 1,
+                src: get_ord_float(0.),
+                dst: get_ord_float(1.),
+                weigth: get_ord_float(1.),
             },
             TreeBranchRaw {
-                src: 0,
-                dst: 2,
-                weigth: 1,
+                src: get_ord_float(0.),
+                dst: get_ord_float(2.),
+                weigth: get_ord_float(1.),
             },
         ];
 
@@ -228,25 +274,36 @@ mod test {
     }
 
     #[test]
+    fn example_tree() {
+        get_simple_tree();
+    }
+
+    #[test]
     fn add_child() {
         let mut tree = Tree::new();
 
         let child = TreeNode {
-            id: 69,
+            id: get_ord_float(69.),
             parent: Some(Rc::clone(&tree.root)),
             children: vec![],
         };
 
-        let root_id = tree.root.borrow().id;
-        tree.add_child(root_id, child, 1).unwrap();
+        let root_id = tree.root.borrow().id.clone();
+        tree.add_child(root_id, child, get_ord_float(1.)).unwrap();
     }
 
     #[test]
     fn iterate_tree() {
-        let tree = get_example_tree();
+        let tree = get_simple_tree();
 
         for node in tree.iter_dfs() {
-            dbg!(node.borrow().id);
+            //dbg!(node.borrow().id);
+            drop(node);
+        }
+
+        for node in tree.iter_bfs() {
+            //dbg!(node.borrow().id);
+            drop(node);
         }
     }
 }
